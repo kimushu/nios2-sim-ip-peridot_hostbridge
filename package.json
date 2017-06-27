@@ -1,0 +1,22 @@
+{
+  "name": "nios2-sim-ip-peridot_hostbridge",
+  "version": "16.1.0",
+  "description": "Simulation module for peridot_hostbridge",
+  "main": "out/src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "compile": "tsc -p .",
+    "prepublish": "npm run compile"
+  },
+  "author": "kimu_shu",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^2.10.0",
+    "nios2-sim": "^0.1.6",
+    "serialport": "^5.0.0-beta4"
+  },
+  "devDependencies": {
+    "@types/node": "^8.0.2",
+    "@types/serialport": "^4.0.9"
+  }
+}
