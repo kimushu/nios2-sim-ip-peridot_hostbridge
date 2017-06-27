@@ -76,8 +76,9 @@ class PeridotHostBridgeModule extends Module {
             this._uid_h = 0;            
         }
         this._user_img = (program.swiImage === "user");
-        this._bid = (program.swiBid || "J72X").substr(0, 4);
-        this._sid = (program.swiSid || "SIMULA-TDHOST-BRIDGE").replace("-", "").substr(0, 18);
+        this._bid = `${(program.swiBid || "J72X")}____}`.substr(0, 4);
+        this._sid = `${(program.swiSid || "SIMULA-TDHOST-BRIDGE").replace(/-/g, "")
+            }${"_".repeat(18)}`.substr(0, 18);
     }
 
     load(moddesc: SopcInfoModule): Promise<void> {
@@ -172,20 +173,16 @@ class PeridotHostBridgeModule extends Module {
                 // clock change
                 if (byte & 0x10) {
                     // rise edge (sample)
-                    console.log("SCL rise");
-                    this._i2cByte = (this._i2cByte << 1) | (byte & 0x20 ? 1 : 0);
+                    this._i2cByte = ((this._i2cByte << 1) | (byte & 0x20 ? 1 : 0)) & 0xff;
                 } else {
                     // fall edge (change)
-                    console.log("SCL fall" + this._i2cState);
                     ++this._i2cState;
                     if (this._i2cState < 8) {
                         this._i2cDriveNext = 0x30;
                     } else if (this._i2cState === 8) {
                         if ((this._i2cByte >>> 1) === EEPROM_SLAVE_ADDR) {
-                            console.log(`EEPROM ACK`);
                             this._i2cDriveNext = 0x10;  // ACK
                         } else {
-                            console.log(`EEPROM NACK: 0x${this._i2cByte.toString(16)}`);
                             this._i2cDriveNext = 0x30;  // NACK
                             this._i2cState = -2;    // Ignore transaction
                         }
@@ -195,7 +192,6 @@ class PeridotHostBridgeModule extends Module {
                         if ((this._i2cState % 9) === 8) {
                             if (this._i2cState < 18) {
                                 this._eepAddr = this._i2cByte;
-                                console.log(`EEPROM set addr ${this._eepAddr}`);
                             } else {
                                 // Write protected
                             }
@@ -207,7 +203,6 @@ class PeridotHostBridgeModule extends Module {
                         // Read (Slave -> Master)
                         let bit = (this._i2cState % 9);
                         if (bit === 8) {
-                            console.log(`EEPROM read at ${this._eepAddr}: 0x${this._eepData[this._eepAddr].toString(16)}`);
                             ++this._eepAddr;
                             this._i2cDriveNext = 0x30;  // Release
                         } else {
@@ -215,15 +210,13 @@ class PeridotHostBridgeModule extends Module {
                         }
                     }
                 }
-            } else if (change & 0x20) {
+            } else if ((change & 0x20) && (byte & 0x10)) {
                 // data change
                 if (byte & 0x20) {
                     // rise edge => STOP condition
-                    console.log(`I2C STOP`);
                     this._i2cState = -2;
                 } else {
                     // fall edge => START condition
-                    console.log(`I2C START`);
                     this._i2cState = -1;
                     this._i2cByte = 0;
                 }
