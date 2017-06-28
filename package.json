@@ -9,6 +9,9 @@
     "prepublish": "npm run compile"
   },
   "author": "kimu_shu",
+  "files": [
+    "out/**/*.js"
+  ],
   "license": "MIT",
   "dependencies": {
     "commander": "^2.10.0",
