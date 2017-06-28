@@ -4,11 +4,24 @@ import { Qsys } from "nios2-sim/types/src/qsys";
 import { SopcInfoModule } from "nios2-sim/types/src/sopcinfo";
 import { AvalonMaster, AvalonSlave, InterruptSender } from "nios2-sim/types/src/interface";
 import * as SerialPort from "serialport";
+import { then } from "nios2-sim/types/src/promiseable";
 
 const EEPROM_SLAVE_ADDR = 0b1010000;
 
 export function getModuleConstructor(kind: string) {
     return PeridotHostBridgeModule;
+}
+
+function loopPromise(start: number, end: number, step: number, action: (offset: number) => any, result?: any): Promise<any> {
+    let next = (now: number, result: any) => {
+        if (((step > 0) && (now < end)) || ((step < 0) && (now > end))) {
+            return Promise.resolve(action(now)).then((result) => {
+                return next(now + step, result);
+            })
+        }
+        return Promise.resolve(result);
+    }
+    return next(start, result);
 }
 
 class PeridotHostBridgeModule extends Module {
@@ -41,8 +54,11 @@ class PeridotHostBridgeModule extends Module {
 
     private _message: number;
     private _swi: boolean;
-    private _receiver: (byte: number) => void;
-    private _escaped: boolean;
+
+    private _receivePromise: Promise<void>;
+    private _receiver: (byte: number) => (Promise<void> | void);
+    private _escaped3: boolean = false;
+
     private _lastCommand: number;
     private _i2cByte: number;
     private _i2cDrive: number;
@@ -51,6 +67,10 @@ class PeridotHostBridgeModule extends Module {
     private _i2cWrite: boolean;
     private _eepAddr: number;
     private _eepData: Uint8Array;
+
+    private _escaped7: boolean = false;
+    private _channel: number = 0;
+    private _packets: Array<number[]> = [];
 
     constructor(path: string, system: Qsys, options: SimulatorOptions) {
         super(path, system, options);
@@ -68,9 +88,9 @@ class PeridotHostBridgeModule extends Module {
         .parse(argv);
         this._port = program.swiPort;
         if (program.swiUid != null) {
-            let uid: string = program.swiUid;
-            this._uid_l = parseInt(uid.substr(-8), 16);
-            this._uid_h = parseInt(`0${uid.substr(0, uid.length - 8)}`, 16);
+            let uid: string = `${"0".repeat(16)}${program.swiUid.replace(/^0x/i, "")}`.substr(-16);
+            this._uid_l = parseInt(uid.substr(8), 16);
+            this._uid_h = parseInt(uid.substr(0, 8), 16);
         } else {
             this._uid_l = 0;
             this._uid_h = 0;            
@@ -116,6 +136,7 @@ class PeridotHostBridgeModule extends Module {
         this.avsirq = <InterruptSender>this.loadInterface(i.avsirq);
 
         let promise = Promise.resolve();
+        this._receivePromise = Promise.resolve();
 
         if (this._port) {
             promise = new Promise<void>((resolve, reject) => {
@@ -126,7 +147,11 @@ class PeridotHostBridgeModule extends Module {
                     console.log(`[peridot_hostbridge] Using port: ${this._port}`);
                     resolve();
                 });
-                this._serial.on("data", this._receiveSerial.bind(this));
+                this._serial.on("data", (data) => {
+                    this._receivePromise = this._receivePromise.then(() => {
+                        return this._receiveSerial(data)
+                    });
+                });
                 this._serial.on("error", (error) => {
                     console.error("[peridot_hostbridge] serial error:", error);
                 });
@@ -138,27 +163,66 @@ class PeridotHostBridgeModule extends Module {
         });
     }
 
-    private _receiveSerial(data: Buffer): void {
-        for (let byte of data) {
-            if (byte === 0x3d) {
-                this._escaped = true;
-                continue;
-            }
-            if (this._escaped) {
-                byte ^= 0x20;
-                this._escaped = false;
-            }
-            if (!this._receiver) {
-                this._receiver = this._receiveStart;
-            }
-            this._receiver(byte);
-        }
+    private _receiveSerial(data: Buffer): Promise<void> {
+        return data.reduce((promise, byte) => {
+            return promise
+            .then(() => {
+                if (byte === 0x3a) {
+                    // Command byte for PERIDOT
+                    this._receiver = this._receiveCommand;
+                    return;
+                }
+                if (!this._receiver) {
+                    this._receiver = this._receiveStart;
+                }
+                return this._receiver(byte);
+            });
+        }, Promise.resolve());
     }
 
-    private _receiveStart(byte: number): void {
-        if (byte === 0x3a) {
-            // Command byte for PERIDOT
-            this._receiver = this._receiveCommand;
+    private _receiveStart(byte: number): Promise<void> | void {
+        let packet: number[];
+        // console.log(`receiveStart: 0x${byte.toString(16)}`);
+        if (byte === 0x3d) {
+            this._escaped3 = true;
+            return;
+        }
+        if (this._escaped3) {
+            byte ^= 0x20;
+            this._escaped3 = false;
+        }
+        switch (byte) {
+            case 0x7c:
+                // Channel prefix
+                this._receiver = this._receiveChannel;
+                return;
+            case 0x7a:
+                // SOP
+                this._packets[this._channel] = [];
+                return;
+            case 0x7b:
+                // EOP
+                packet = this._packets[this._channel];
+                if (packet) {
+                    packet["eop"] = true;
+                }
+                return;
+            case 0x7d:
+                // Escape
+                this._escaped7 = true;
+                return;
+        }
+        if (this._escaped7) {
+            byte ^= 0x20;
+            this._escaped7 = false;
+        }
+        packet = this._packets[this._channel];
+        if (packet) {
+            packet.push(byte);
+            if (packet["eop"]) {
+                this._packets[this._channel] = null;
+                this._processPacket(Buffer.from(packet));
+            }
         }
     }
 
@@ -232,7 +296,170 @@ class PeridotHostBridgeModule extends Module {
         this._receiver = null;
     }
 
+    private _receiveChannel(byte: number): void {
+        this._channel = byte;
+        this._receiver = null;
+    }
+
+    private _processPacket(packet: Buffer): Promise<void> {
+        let addr: number;
+        let size: number;
+        let incl: number = 1;
+        let promise: Promise<any>;
+        let pre: number;
+        let mid: number;
+        let post: number;
+        let buf: Buffer;
+
+        console.log(`processPacket(0x${packet.readUInt8(0).toString(16)})`);
+        switch (packet.readUInt8(0)) {
+            case 0x00:  // Write, non-incrementing address
+                incl = 0;
+                /* fall through */
+            case 0x04:  // Write, incrementing address
+                addr = packet.readUInt32BE(4);
+                size = packet.readUInt16BE(2);
+                pre = (4 - (addr & 3)) & 3;
+                mid = (size - pre) & ~3;
+                post = size - (pre + mid);
+                return Promise.resolve()
+                .then(() => {
+                    return loopPromise(
+                        0, pre, 1,
+                        (offset) => this.m1.write8(addr + incl * offset, packet.readUInt8(8 + offset))
+                    );
+                })
+                .then(() => {
+                    return loopPromise(
+                        pre, pre + mid, 4,
+                        (offset) => this.m1.write32(addr + incl * offset, packet.readUInt32LE(8 + offset))
+                    );
+                })
+                .then(() => {
+                    return loopPromise(
+                        pre + mid, pre + mid + post, 1,
+                        (offset) => this.m1.write8(addr + incl * offset, packet.readUInt8(8 + offset))
+                    );
+                })
+                .then(() => {
+                    let buf: Buffer = Buffer.allocUnsafe(4);
+                    buf[0] = packet[0] ^ 0x80;
+                    buf[1] = 0;
+                    buf.writeUInt16BE(size, 2);
+                    return this._sendPacket(0, buf);
+                });
+            case 0x10:  // Read, non-incrementing address
+                addr = packet.readUInt32BE(4);
+                size = packet.readUInt16BE(2);
+                return loopPromise(
+                    0, size, 4,
+                    () => this.m1.read32(addr, 4),
+                    new Uint32Array([0])
+                )
+                .then((i32: Uint32Array) => {
+                    console.log(`read addr=0x${addr.toString(16)}, size=0x${size.toString(16)}, result=${i32}`);
+                    return this._sendPacket(0, Buffer.from(i32.buffer, i32.byteOffset, size));
+                });
+            case 0x14:  // Read, incrementing address
+                addr = packet.readUInt32BE(4);
+                size = packet.readUInt16BE(2);
+                pre = (4 - (addr & 3)) & 3;
+                mid = (size - pre) & ~3;
+                post = size - (pre + mid);
+                buf = Buffer.allocUnsafe(size);
+                return Promise.resolve()
+                .then(() => {
+                    let readPre = (offset: number): Promise<void> => {
+                        let len = pre - offset;
+                        return Promise.resolve(this.m1.read8(addr + offset, len))
+                        .then((i8) => {
+                            if (i8) {
+                                buf.set(i8.subarray(0, len), offset);
+                                offset += i8.length;
+                                if (offset < pre) {
+                                    return readPre(offset);
+                                }
+                            }
+                        })
+                    };
+                    return readPre(0);
+                })
+                .then(() => {
+                    let readMid = (offset: number): Promise<void> => {
+                        let len = (pre + mid) - offset;
+                        return Promise.resolve(this.m1.read32(addr + offset, len))
+                        .then((i32) => {
+                            if (i32) {
+                                buf.set(
+                                    new Uint8Array(i32.buffer, i32.byteOffset + offset, i32.byteLength)
+                                    .subarray(0, len),
+                                    offset
+                                );
+                                offset += i32.byteLength;
+                                if (offset < (pre + mid)) {
+                                    return readMid(offset);
+                                }
+                            }
+                        })
+                    };
+                    return readMid(pre);
+                })
+                .then(() => {
+                    let readPost = (offset: number): Promise<void> => {
+                        let len = size - offset;
+                        return Promise.resolve(this.m1.read8(addr + offset, len))
+                        .then((i8) => {
+                            if (i8) {
+                                buf.set(i8.subarray(0, len), offset);
+                                offset += i8.length;
+                                if (offset < size) {
+                                    return readPost(offset);
+                                }
+                            }
+                        });
+                    };
+                    return readPost(pre + mid);
+                })
+                .then(() => {
+                    return this._sendPacket(0, buf);
+                });
+            case 0x7f:  // No transaction
+            default:    // Unsupported transaction codes
+                return Promise.resolve(this._sendPacket(0, Buffer.from([0xff, 0x00, 0x00, 0x00])));
+        }
+    }
+
+    private _sendPacket(channel: number, data: Buffer): void {
+        let encoded: Buffer = Buffer.allocUnsafe(data.length * 2 + 4);
+        let n = 0;
+        encoded[n++] = 0x7c;
+        encoded[n++] = channel;
+        encoded[n++] = 0x7a;
+        for (let i = 0; i < data.length; ++i) {
+            if ((i + 1) === data.length) {
+                encoded[n++] = 0x7b;
+            }
+            let byte = data[i];
+            switch (byte) {
+                case 0x7a:
+                case 0x7b:
+                case 0x7c:
+                case 0x7d:
+                    encoded[n++] = 0x7d;
+                    encoded[n++] = byte ^ 0x20;
+                    break;
+                default:
+                    encoded[n++] = byte;
+            }
+        }
+        encoded = encoded.slice(0, n);
+        console.log(`packet ${encoded.length} bytes:`);
+        console.log(Array.from(encoded).map((v) => `0${v.toString(16)}`.substr(-2)).join(", "));
+        this._serial.write(encoded.slice(0, n));
+    }
+
     private _readReg(offset: number): number {
+        console.log(`SWI readreg: ${offset}`);
         switch (offset) {
             case 0:
                 return this._classid;

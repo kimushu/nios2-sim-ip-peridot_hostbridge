@@ -12,7 +12,7 @@
   "license": "MIT",
   "dependencies": {
     "commander": "^2.10.0",
-    "nios2-sim": "^0.1.6",
+    "nios2-sim": "^0.1.7",
     "serialport": "^5.0.0-beta4"
   },
   "devDependencies": {
