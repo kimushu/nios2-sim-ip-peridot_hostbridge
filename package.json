@@ -1,5 +1,5 @@
 {
-  "name": "nios2-sim-ip-peridot_hostbridge",
+  "name": "@nios2-sim-ip/peridot_hostbridge",
   "version": "16.1.0",
   "description": "Simulation module for peridot_hostbridge",
   "main": "out/src/index.js",
